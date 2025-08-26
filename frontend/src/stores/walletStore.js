@@ -3,6 +3,7 @@ import { persist } from 'zustand/middleware';
 import { ethers } from 'ethers';
 import { CURRENT_NETWORK, CONTRACT_ADDRESSES } from '../constants/config';
 import { PAYMENT_ESCROW_ABI, ERC20_ABI } from '../constants/abi';
+import { useLiffStore } from './liffStore';
 
 export const useWalletStore = create(
   persist(
@@ -17,19 +18,124 @@ export const useWalletStore = create(
       signer: null,
       isConnecting: false,
       error: null,
+      connectionType: null, // 'metamask', 'line_dapp_portal', 'walletconnect'
 
       // Contracts
       paymentEscrowContract: null,
       usdtContract: null,
 
+      // LIFF Integration
+      isLiffReady: false,
+      isDappPortalAvailable: false,
+
       // Actions
-      connectWallet: async () => {
+      initializeWallet: async () => {
         try {
           set({ isConnecting: true, error: null });
 
-          // Check if wallet is available
+          // Initialize LIFF first
+          const liffStore = useLiffStore.getState();
+          if (!liffStore.isInitialized) {
+            await liffStore.initializeLiff();
+          }
+
+          // Check for available wallet providers
+          const providers = get().detectWalletProviders();
+          
+          // If in LINE client, prefer Dapp Portal
+          if (liffStore.isInClient && providers.lineDappPortal) {
+            await get().connectLineDappPortal();
+          } else if (providers.metamask) {
+            await get().connectMetaMask();
+          } else {
+            throw new Error('No compatible wallet found. Please install MetaMask or use LINE Dapp Portal.');
+          }
+
+        } catch (error) {
+          console.error('Wallet initialization failed:', error);
+          set({
+            isConnecting: false,
+            error: error.message,
+          });
+          throw error;
+        }
+      },
+
+      detectWalletProviders: () => {
+        const providers = {
+          metamask: !!window.ethereum?.isMetaMask,
+          lineDappPortal: !!window.dapp,
+          walletConnect: false, // Can be implemented later
+        };
+
+        set({
+          isDappPortalAvailable: providers.lineDappPortal,
+        });
+
+        return providers;
+      },
+
+      connectLineDappPortal: async () => {
+        try {
+          set({ isConnecting: true, error: null, connectionType: 'line_dapp_portal' });
+
+          if (!window.dapp) {
+            throw new Error('LINE Dapp Portal not available');
+          }
+
+          // Request account access via LINE Dapp Portal
+          const accounts = await window.dapp.request({
+            method: 'dapp_requestAccount'
+          });
+
+          if (!accounts || accounts.length === 0) {
+            throw new Error('No accounts found in LINE Dapp Portal');
+          }
+
+          const address = accounts[0];
+          
+          // Create provider using LINE Dapp Portal
+          const provider = new ethers.providers.Web3Provider(window.dapp);
+          const signer = provider.getSigner();
+          const network = await provider.getNetwork();
+
+          // Check network compatibility
+          if (network.chainId.toString() !== parseInt(CURRENT_NETWORK.chainId, 16).toString()) {
+            await get().switchToCorrectNetwork();
+          }
+
+          // Initialize wallet connection
+          await get().initializeWalletConnection(address, provider, signer, network, 'line_dapp_portal');
+
+          // Setup LINE Dapp Portal event listeners
+          window.dapp.on('accountsChanged', (accounts) => {
+            if (accounts.length === 0) {
+              get().disconnect();
+            } else {
+              get().initializeWallet();
+            }
+          });
+
+          window.dapp.on('chainChanged', () => {
+            window.location.reload();
+          });
+
+        } catch (error) {
+          console.error('LINE Dapp Portal connection failed:', error);
+          set({
+            isConnecting: false,
+            error: error.message,
+          });
+          throw error;
+        }
+      },
+
+      connectMetaMask: async () => {
+        try {
+          set({ isConnecting: true, error: null, connectionType: 'metamask' });
+
           if (!window.ethereum) {
-            throw new Error('No wallet detected. Please install MetaMask or use LINE Dapp Portal.');
+            throw new Error('MetaMask not detected. Please install MetaMask.');
           }
 
           // Request account access
@@ -51,6 +157,35 @@ export const useWalletStore = create(
             await get().switchToCorrectNetwork();
           }
 
+          // Initialize wallet connection
+          await get().initializeWalletConnection(address, provider, signer, network, 'metamask');
+
+          // Listen for account changes
+          window.ethereum.on('accountsChanged', (accounts) => {
+            if (accounts.length === 0) {
+              get().disconnect();
+            } else {
+              get().initializeWallet();
+            }
+          });
+
+          // Listen for chain changes
+          window.ethereum.on('chainChanged', () => {
+            window.location.reload();
+          });
+
+        } catch (error) {
+          console.error('MetaMask connection failed:', error);
+          set({
+            isConnecting: false,
+            error: error.message,
+          });
+          throw error;
+        }
+      },
+
+      initializeWalletConnection: async (address, provider, signer, network, connectionType) => {
+        try {
           // Get balances
           const balance = await provider.getBalance(address);
           const usdtContract = new ethers.Contract(CONTRACT_ADDRESSES.USDT_TOKEN, ERC20_ABI, provider);
@@ -81,30 +216,18 @@ export const useWalletStore = create(
             usdtContract: usdtContractWithSigner,
             isConnecting: false,
             error: null,
-          });
-
-          // Listen for account changes
-          window.ethereum.on('accountsChanged', (accounts) => {
-            if (accounts.length === 0) {
-              get().disconnect();
-            } else {
-              get().connectWallet();
-            }
-          });
-
-          // Listen for chain changes
-          window.ethereum.on('chainChanged', () => {
-            window.location.reload();
+            connectionType,
           });
 
         } catch (error) {
-          console.error('Wallet connection failed:', error);
-          set({
-            isConnecting: false,
-            error: error.message,
-          });
+          console.error('Failed to initialize wallet connection:', error);
           throw error;
         }
+      },
+
+      // Legacy connectWallet method for backward compatibility
+      connectWallet: async () => {
+        return get().initializeWallet();
       },
 
       disconnect: () => {
@@ -119,20 +242,35 @@ export const useWalletStore = create(
           paymentEscrowContract: null,
           usdtContract: null,
           error: null,
+          connectionType: null,
         });
       },
 
       switchToCorrectNetwork: async () => {
+        const { connectionType } = get();
+        
         try {
-          await window.ethereum.request({
-            method: 'wallet_switchEthereumChain',
-            params: [{ chainId: CURRENT_NETWORK.chainId }],
-          });
+          if (connectionType === 'line_dapp_portal' && window.dapp) {
+            // Switch network via LINE Dapp Portal
+            await window.dapp.request({
+              method: 'wallet_switchEthereumChain',
+              params: [{ chainId: CURRENT_NETWORK.chainId }],
+            });
+          } else if (connectionType === 'metamask' && window.ethereum) {
+            // Switch network via MetaMask
+            await window.ethereum.request({
+              method: 'wallet_switchEthereumChain',
+              params: [{ chainId: CURRENT_NETWORK.chainId }],
+            });
+          } else {
+            throw new Error('No wallet provider available for network switching');
+          }
         } catch (switchError) {
-          // This error code indicates that the chain has not been added to MetaMask
+          // This error code indicates that the chain has not been added to the wallet
           if (switchError.code === 4902) {
             try {
-              await window.ethereum.request({
+              const provider = connectionType === 'line_dapp_portal' ? window.dapp : window.ethereum;
+              await provider.request({
                 method: 'wallet_addEthereumChain',
                 params: [CURRENT_NETWORK],
               });
@@ -162,15 +300,26 @@ export const useWalletStore = create(
         }
       },
 
-      // Payment functions
+      // Enhanced payment functions with LIFF integration
       approveUSDT: async (spenderAddress, amount) => {
-        const { usdtContract, address } = get();
+        const { usdtContract, address, connectionType } = get();
         if (!usdtContract || !address) {
           throw new Error('Wallet not connected');
         }
 
         try {
           const amountInWei = ethers.utils.parseUnits(amount.toString(), 6);
+          
+          // Show appropriate confirmation based on connection type
+          if (connectionType === 'line_dapp_portal') {
+            // LINE users might want to see a friendly confirmation
+            const liffStore = useLiffStore.getState();
+            if (liffStore.isInClient) {
+              // Could show custom LINE-style confirmation
+              console.log('Requesting USDT approval via LINE Dapp Portal...');
+            }
+          }
+          
           const tx = await usdtContract.approve(spenderAddress, amountInWei);
           return tx;
         } catch (error) {
@@ -193,19 +342,30 @@ export const useWalletStore = create(
       },
 
       createPayment: async (merchantAddress, amount, orderId, description) => {
-        const { paymentEscrowContract, address } = get();
+        const { paymentEscrowContract, address, connectionType } = get();
         if (!paymentEscrowContract || !address) {
           throw new Error('Wallet not connected');
         }
 
         try {
           const amountInWei = ethers.utils.parseUnits(amount.toString(), 6);
+          
+          // Enhanced transaction tracking for LINE users
+          if (connectionType === 'line_dapp_portal') {
+            const liffStore = useLiffStore.getState();
+            if (liffStore.isInClient && liffStore.user) {
+              // Could log payment attempt with LINE user context
+              console.log(`Payment creation by LINE user: ${liffStore.user.displayName}`);
+            }
+          }
+          
           const tx = await paymentEscrowContract.createPayment(
             merchantAddress,
             amountInWei,
             orderId,
             description
           );
+          
           return tx;
         } catch (error) {
           console.error('Payment creation failed:', error);

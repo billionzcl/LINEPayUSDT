@@ -14,6 +14,7 @@ import PaymentSuccess from './components/PaymentSuccess';
 import MerchantDashboard from './components/MerchantDashboard';
 import ErrorScreen from './components/ErrorScreen';
 import LoadingScreen from './components/LoadingScreen';
+import LiffWalletTest from './components/LiffWalletTest';
 
 // Hooks
 import { useLiff } from './hooks/useLiff';
@@ -94,6 +95,9 @@ function App() {
               
               {/* Merchant Dashboard */}
               <Route path="/dashboard" element={<MerchantDashboard />} />
+              
+              {/* Test Components */}
+              <Route path="/test/liff-wallet" element={<LiffWalletTest />} />
               
               {/* Error handling */}
               <Route path="/error" element={<ErrorScreen />} />

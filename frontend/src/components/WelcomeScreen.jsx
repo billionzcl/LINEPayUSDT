@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useWalletStore } from '../stores/walletStore';
 import { useLiffStore } from '../stores/liffStore';
@@ -6,29 +6,110 @@ import toast from 'react-hot-toast';
 
 const WelcomeScreen = () => {
   const navigate = useNavigate();
-  const { connectWallet, isConnecting } = useWalletStore();
-  const { isInClient, user, login, isLoggedIn } = useLiffStore();
+  const {
+    isConnected,
+    address,
+    connectionType,
+    isDappPortalAvailable,
+    initializeWallet,
+    connectLineDappPortal,
+    connectMetaMask,
+    isConnecting,
+    error: walletError
+  } = useWalletStore();
+  
+  const {
+    isInitialized,
+    isInClient,
+    user,
+    login,
+    isLoggedIn,
+    initializeLiff,
+    isLoading: liffLoading,
+    error: liffError
+  } = useLiffStore();
+  
   const [isConnectingWallet, setIsConnectingWallet] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(true);
+
+  useEffect(() => {
+    const initializeApp = async () => {
+      try {
+        setIsInitializing(true);
+        
+        // Initialize LIFF first
+        if (!isInitialized) {
+          await initializeLiff();
+        }
+        
+        // Auto-connect if conditions are met
+        if (!isConnected && (isLoggedIn || !isInClient)) {
+          try {
+            await initializeWallet();
+          } catch (err) {
+            console.log('Auto-connect failed, will require manual connection');
+          }
+        }
+      } catch (error) {
+        console.error('App initialization failed:', error);
+        toast.error('Failed to initialize app');
+      } finally {
+        setIsInitializing(false);
+      }
+    };
+
+    initializeApp();
+  }, [isInitialized, isLoggedIn, isInClient, isConnected]);
 
   const handleConnectWallet = async () => {
     try {
       setIsConnectingWallet(true);
       
-      // If not logged in to LINE, login first
+      // If in LINE client and not logged in, login first
       if (isInClient && !isLoggedIn) {
         await login();
         return;
       }
 
-      await connectWallet();
-      toast.success('Wallet connected successfully!');
-      navigate('/merchants');
+      // Choose connection method based on environment
+      if (isInClient && isDappPortalAvailable) {
+        await connectLineDappPortal();
+        toast.success('Connected via LINE Dapp Portal!');
+      } else {
+        await connectMetaMask();
+        toast.success('Connected via MetaMask!');
+      }
+      
+      // Navigate after successful connection
+      if (isConnected) {
+        navigate('/merchants');
+      }
     } catch (error) {
+      console.error('Wallet connection failed:', error);
       toast.error(error.message || 'Failed to connect wallet');
     } finally {
       setIsConnectingWallet(false);
     }
   };
+
+  // Navigate if already connected
+  useEffect(() => {
+    if (isConnected && !isConnecting && !isConnectingWallet) {
+      navigate('/merchants');
+    }
+  }, [isConnected, isConnecting, isConnectingWallet]);
+
+  if (isInitializing || liffLoading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-line-green to-green-600 flex items-center justify-center">
+        <div className="text-center text-white">
+          <div className="w-16 h-16 border-4 border-white border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-lg font-medium">Initializing LINEPayUSDT...</p>
+          <p className="text-sm opacity-80 mt-2">Setting up LIFF and wallet connection</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-line-green to-green-600 flex items-center justify-center p-4">
@@ -67,7 +148,7 @@ const WelcomeScreen = () => {
 
             {/* User Info (if logged in) */}
             {isLoggedIn && user && (
-              <div className="mb-6 p-4 bg-gray-50 rounded-xl">
+              <div className="mb-6 p-4 bg-green-50 rounded-xl border border-green-200">
                 <div className="flex items-center justify-center space-x-3">
                   <img 
                     src={user.pictureUrl} 
@@ -76,35 +157,89 @@ const WelcomeScreen = () => {
                   />
                   <div className="text-left">
                     <p className="font-medium text-gray-900">{user.displayName}</p>
-                    <p className="text-sm text-gray-500">Logged in via LINE</p>
+                    <p className="text-sm text-green-600 flex items-center space-x-1">
+                      <span>✅</span>
+                      <span>Logged in via LINE</span>
+                    </p>
                   </div>
                 </div>
               </div>
             )}
 
-            {/* Connect Wallet Button */}
-            <button
-              onClick={handleConnectWallet}
-              disabled={isConnecting || isConnectingWallet}
-              className="w-full btn-primary h-14 text-lg font-semibold relative overflow-hidden group"
-            >
-              {isConnecting || isConnectingWallet ? (
-                <div className="flex items-center justify-center space-x-3">
-                  <div className="w-5 h-5 loading-spinner"></div>
-                  <span>Connecting...</span>
+            {/* Wallet Connection Status */}
+            {isConnected && address && (
+              <div className="mb-6 p-4 bg-blue-50 rounded-xl border border-blue-200">
+                <div className="text-center">
+                  <p className="font-medium text-blue-900 mb-2">Wallet Connected</p>
+                  <p className="text-sm text-blue-700 mb-1">
+                    {address.slice(0, 6)}...{address.slice(-4)}
+                  </p>
+                  <p className="text-xs text-blue-600 flex items-center justify-center space-x-1">
+                    <span>
+                      {connectionType === 'line_dapp_portal' ? '🔗' : '🦊'}
+                    </span>
+                    <span>
+                      {connectionType === 'line_dapp_portal' ? 'LINE Dapp Portal' : 'MetaMask'}
+                    </span>
+                  </p>
                 </div>
-              ) : (
+              </div>
+            )}
+
+            {/* Error Display */}
+            {(walletError || liffError) && (
+              <div className="mb-6 p-4 bg-red-50 rounded-xl border border-red-200">
+                <p className="text-red-700 text-sm text-center">
+                  ⚠️ {walletError || liffError}
+                </p>
+              </div>
+            )}
+
+            {/* Connect Wallet Button */}
+            {!isConnected && (
+              <button
+                onClick={handleConnectWallet}
+                disabled={isConnecting || isConnectingWallet}
+                className="w-full btn-primary h-14 text-lg font-semibold relative overflow-hidden group"
+              >
+                {isConnecting || isConnectingWallet ? (
+                  <div className="flex items-center justify-center space-x-3">
+                    <div className="w-5 h-5 loading-spinner"></div>
+                    <span>Connecting...</span>
+                  </div>
+                ) : (
+                  <span className="flex items-center justify-center space-x-3">
+                    <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    <span>
+                      {isInClient && isDappPortalAvailable
+                        ? 'Connect LINE Dapp Portal'
+                        : isInClient && !isLoggedIn
+                        ? 'Login with LINE'
+                        : 'Connect Wallet'
+                      }
+                    </span>
+                  </span>
+                )}
+                
+                {/* Animated background */}
+                <div className="absolute inset-0 bg-gradient-to-r from-green-600 to-line-green transform scale-x-0 group-hover:scale-x-100 transition-transform origin-left duration-300"></div>
+              </button>
+            )}
+
+            {/* Already Connected Button */}
+            {isConnected && (
+              <button
+                onClick={() => navigate('/merchants')}
+                className="w-full bg-green-500 text-white h-14 text-lg font-semibold rounded-xl hover:bg-green-600 transition-colors"
+              >
                 <span className="flex items-center justify-center space-x-3">
-                  <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                  </svg>
-                  <span>Connect Wallet</span>
+                  <span>✅</span>
+                  <span>Continue to Shop</span>
                 </span>
-              )}
-              
-              {/* Animated background */}
-              <div className="absolute inset-0 bg-gradient-to-r from-green-600 to-line-green transform scale-x-0 group-hover:scale-x-100 transition-transform origin-left duration-300"></div>
-            </button>
+              </button>
+            )}
           </div>
 
           {/* Features Preview */}
